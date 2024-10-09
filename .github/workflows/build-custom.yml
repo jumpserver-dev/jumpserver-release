@@ -1,62 +1,50 @@
-name: Build Release
+name: Build Custom
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: '0 20 * * *'
+    inputs:
+      tag:
+        description: 'Build Tag'
+        required: true
+        default: 'dev'
+      version:
+        description: 'Image Tag'
+        required: true
+        default: 'dev'
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    outputs:
-      build: ${{ steps.check_build.outputs.build }}
-      version: ${{ steps.get_version.outputs.version }}
     steps:
       - name: Get Version
         id: get_version
         run: |
-          version=$(curl -s https://api.github.com/repos/jumpserver/jumpserver/releases/latest | jq -r .tag_name)
+          version=${{ github.event.inputs.tag }}
           echo "Current Version: ${version}"
-          if [ -z "${version}" ]; then
-            exit 1
-          fi
           echo "version=${version}" >> $GITHUB_ENV
           echo "version=${version}" >> $GITHUB_OUTPUT
 
-      - name: Check Build
-        id: check_build
-        run: |
-          curl -s https://api.github.com/repos/${{ github.repository }}/tags | jq -r .[].name | grep -q ${{ env.version }} || echo "create_tag=1" >> $GITHUB_ENV
-          gh release view ${{ env.version }} -R ${{ github.repository }} >/dev/null 2>&1 || echo "create_release=1" >> $GITHUB_ENV
-          gh release view ${{ env.version }} -R ${{ github.repository }} | grep sha256sum.txt >/dev/null 2>&1 || echo "build=1" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Checkout Code
-        if: env.create_tag == '1'
         uses: actions/checkout@v4
 
       - name: Create Tag
-        if: env.create_tag == '1'
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          git tag ${{ env.version }}
-          git push origin ${{ env.version }}
+          git tag ${{ env.version }} || echo "Tag already exists"
+          git push origin ${{ env.version }} || echo "Tag already pushed"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check Release
-        if: env.create_release == '1'
         run: |
-          gh release create ${{ env.version }} -t ${{ env.version }} -n "Release ${{ env.version }}" -R ${{ github.repository }}
+          gh release create ${{ env.version }} -t ${{ env.version }} -n "Release ${{ env.version }}" -R ${{ github.repository }} || echo "Release already exists"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   release:
     runs-on: ubuntu-latest
     needs: check
-    if: needs.check.outputs.build == '1'
     strategy:
       matrix:
         go_version: [ 'stable' ]
@@ -89,7 +77,7 @@ jobs:
 
       - name: Get Version
         run: |
-          version=${{ needs.check.outputs.version }}
+          version=${{ github.event.inputs.tag }}
           echo "version=${version}" >> $GITHUB_ENV
 
       - uses: actions/setup-go@v5
@@ -246,9 +234,7 @@ jobs:
 
       - name: Upload Binaries
         run: |
-          if ! gh release view ${{ env.version }} -R ${{ github.repository }} | grep ${{ matrix.component }} >/dev/null 2>&1; then
-            gh release upload ${{ env.version }} dist/*.tar.gz -R ${{ github.repository }}
-          fi
+          gh release upload ${{ env.version }} dist/*.tar.gz -R ${{ github.repository }} --clobber
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -269,7 +255,7 @@ jobs:
           build-args: |
             VERSION=${{ env.version }}
           tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ env.version }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.component }}:${{ github.event.inputs.version }}
           outputs: type=image,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
           cache-from: type=local,src=/tmp/.buildx-cache
           cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
@@ -278,28 +264,3 @@ jobs:
         run: |
           rm -rf /tmp/.buildx-cache
           mv /tmp/.buildx-cache-new /tmp/.buildx-cache
-
-  verfiy:
-    runs-on: ubuntu-latest
-    needs: release
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v4
-
-      - name: Get Version
-        run: |
-          version=${{ needs.check.outputs.version }}
-          echo "version=${version}" >> $GITHUB_ENV
-
-      - name: Verify Release
-        run: |
-          gh release view ${{ env.version }} -R ${{ github.repository }} | grep sha256sum.txt >/dev/null 2>&1 || echo "Verify=1" >> $GITHUB_env
-
-      - name: Verify Binaries
-        if: ${{ env.Verify == '1' }}
-        run: |
-          gh release download ${{ env.version }} -R ${{ github.repository }} --pattern '*.tar.gz'
-          sha256sum *.tar.gz > sha256sum.txt
-          gh release upload ${{ env.version }} sha256sum.txt -R ${{ github.repository }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
